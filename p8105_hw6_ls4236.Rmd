@@ -1,0 +1,150 @@
+---
+title: "p8105_hw6_ls4236"
+author: "Liliang Su"
+date: "2025-11-16"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(broom)
+
+knitr::opts_chunk$set(
+  fig.width = 8,
+  fig.asp = .6,
+  out.width = "90%"
+)
+
+theme_set(theme_minimal() + theme(legend.position = "bottom"))
+
+options(
+  ggplot2.continuous.colour = "viridis",
+  ggplot2.continuous.fill = "viridis"
+)
+
+scale_colour_discrete = scale_colour_viridis_d
+scale_fill_discrete = scale_fill_viridis_d
+```
+
+## Problem 1
+
+Load and clean data.
+
+```{r}
+homi_df_raw = 
+  read_csv(file = "./data/homicide-data.csv", na = c("NA",".","")) |> 
+  janitor::clean_names() 
+
+homi_df = homi_df_raw |> 
+  mutate(
+    city_state = str_c(city, ", ", state)
+  ) |> 
+  # binary indicator
+  mutate(resolved = disposition == "Closed by arrest") |>
+  # Omit specified cities
+  filter(!city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL")) |>
+  # Limit analysis to 'white' or 'black' victims
+  filter(victim_race %in% c("White", "Black")) |>
+  # make sure victim_age is numeric
+  mutate(victim_age = as.numeric(victim_age)) |> 
+  mutate(victim_sex = factor(victim_sex, levels = c("Female", "Male")),
+         victim_race = factor(victim_race, levels = c("Black", "White")))
+```
+
+### Baltimore GLM Analysis
+
+```{r}
+baltimore_df <- homi_df |>
+  filter(city_state == "Baltimore, MD")
+
+# Fit the logistic regression model
+baltimore_model <- glm(
+  resolved ~ victim_age + victim_sex + victim_race,
+  family = binomial(link = "logit"),
+  data = baltimore_df
+)
+
+# Apply tidy, get estimate and CIs for adjusted ORs
+baltimore_results <- tidy(baltimore_model, conf.int = TRUE, exponentiate = TRUE) |>
+  # Filter for the Male coefficient (Male is level 2, Female is reference)
+  filter(term == "victim_sexMale") |>
+  select(estimate, conf.low, conf.high)
+
+baltimore_results
+```
+
+The estimate of adjusted odds ratio for for solving homicides comparing male victims to female victims keeping all other variables fixed is `r baltimore_results[[1]]`, and CI is (`r baltimore_results[[2]]`, `r baltimore_results[[3]]`).
+
+
+### Multi-cities GLM Analysis
+
+```{r}
+# function to fit the model and extract the Male OR
+glm_for_maleOR <- function(data) {
+  
+  # fit the model
+  fit = glm(
+    resolved ~ victim_age + victim_sex + victim_race,
+    family = binomial(link = "logit"),
+    data = data
+    )
+  
+  # Extract OR and CI using broom
+  tidy_results <- tidy(fit, conf.int = TRUE, exponentiate = TRUE) |>
+    filter(term == "victim_sexMale") |>
+    select(estimate, conf.low, conf.high)
+  
+  return(tidy_results)
+  }
+
+# Run the analysis across all cities
+cities_results <- homi_df |>
+  group_by(city_state) |>
+  nest() |>
+  # Apply the function to each city's data
+  mutate(tidy_results = map(data, glm_for_maleOR)) |>
+  select(city_state, tidy_results) |>
+  # Expand the list-column of ORs into rows
+  unnest(tidy_results)
+
+cities_results |> 
+  knitr::kable()
+```
+
+```{r}
+
+# Create the plot
+cities_plot <- cities_results |>
+  # Reorder city_state factor by the OR estimate
+  mutate(city_state = fct_reorder(city_state, estimate)) |>
+  ggplot(aes(x = estimate, y = city_state)) +
+  # Add horizontal error bars for the 95% CI
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.2, color = "dodgerblue") +
+  # Add points for the OR estimate
+  geom_point() +
+  # Add a vertical reference line at OR = 1 (no effect)
+  geom_vline(xintercept = 1, linetype = "dashed", color = "red") +
+  
+  # Labels and themes
+  labs(
+    title = "Adjusted Odds Ratio for Homicide Resolution",
+    subtitle = "Comparing Male vs. Female Victims (Adjusted for Age and Race)",
+    x = "Adjusted Odds Ratio (Male vs. Female)",
+    y = NULL
+  ) +
+  scale_x_continuous(trans = 'log10', breaks = c(0.25, 0.5, 1, 2, 4)) + 
+  theme(
+    axis.text.y = element_text(size = 8),
+    plot.title = element_text(face = "bold")
+  )
+
+cities_plot
+```
+
+**Comment**:
+
+- Interpretation of Estimate: Most cities have ORs less than 1.0, which means there is a prevalent pattern where homicides involving male victims are less likely to be solved than those involving female victims. For example, cities like New York shows a strong, statistically significant difference, where the odds of solving a male victim's homicide are less than half that of a female victim's.
+
+- Interpretation of CIs: The width of confidence intervals indicates the statistical certainty of the adujsted ORs. For many cities, the horizontal CI bar crosses the red line at OR = 1.0. In these cities, we do not have significant evidence to conclude that victim sex is a significant predictor of homicide resolution, when controlling for age and race. On the other hand, there are quite a few cities confidence interval upper bounds below 1, which means there are significant evidence that victim sex is a significant predictor of homicide resolution, when controlling for age and race.
+
+- Cities with Higher Odds: A few cities like Albuquerque shows an estimated OR greater than 1.0, though the confidence interval is often wide. This suggests the possibility that male victims' homicides are more likely to be solved there, but the uncertainty is high.
