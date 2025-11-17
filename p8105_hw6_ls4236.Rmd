@@ -7,7 +7,9 @@ output: github_document
 
 ```{r setup, include=FALSE}
 library(tidyverse)
-library(broom)
+library(p8105.datasets)
+library(modelr)
+
 
 knitr::opts_chunk$set(
   fig.width = 8,
@@ -65,7 +67,7 @@ baltimore_model <- glm(
 )
 
 # Apply tidy, get estimate and CIs for adjusted ORs
-baltimore_results <- tidy(baltimore_model, conf.int = TRUE, exponentiate = TRUE) |>
+baltimore_results <- broom::tidy(baltimore_model, conf.int = TRUE, exponentiate = TRUE) |>
   # Filter for the Male coefficient (Male is level 2, Female is reference)
   filter(term == "victim_sexMale") |>
   select(estimate, conf.low, conf.high)
@@ -90,7 +92,7 @@ glm_for_maleOR <- function(data) {
     )
   
   # Extract OR and CI using broom
-  tidy_results <- tidy(fit, conf.int = TRUE, exponentiate = TRUE) |>
+  tidy_results <- broom::tidy(fit, conf.int = TRUE, exponentiate = TRUE) |>
     filter(term == "victim_sexMale") |>
     select(estimate, conf.low, conf.high)
   
@@ -143,8 +145,120 @@ cities_plot
 
 **Comment**:
 
-- Interpretation of Estimate: Most cities have ORs less than 1.0, which means there is a prevalent pattern where homicides involving male victims are less likely to be solved than those involving female victims. For example, cities like New York shows a strong, statistically significant difference, where the odds of solving a male victim's homicide are less than half that of a female victim's.
+- **Interpretation of Estimate**: Most cities have ORs less than 1.0, which means there is a prevalent pattern where homicides involving male victims are less likely to be solved than those involving female victims. For example, cities like New York shows a strong, statistically significant difference, where the odds of solving a male victim's homicide are less than half that of a female victim's.
 
-- Interpretation of CIs: The width of confidence intervals indicates the statistical certainty of the adujsted ORs. For many cities, the horizontal CI bar crosses the red line at OR = 1.0. In these cities, we do not have significant evidence to conclude that victim sex is a significant predictor of homicide resolution, when controlling for age and race. On the other hand, there are quite a few cities confidence interval upper bounds below 1, which means there are significant evidence that victim sex is a significant predictor of homicide resolution, when controlling for age and race.
+- **Interpretation of CIs**: The width of confidence intervals indicates the statistical certainty of the adujsted ORs. For many cities, the horizontal CI bar crosses the red line at OR = 1.0. In these cities, we do not have significant evidence to conclude that victim sex is a significant predictor of homicide resolution, when controlling for age and race. On the other hand, there are quite a few cities confidence interval upper bounds below 1, which means there are significant evidence that victim sex is a significant predictor of homicide resolution, when controlling for age and race.
 
-- Cities with Higher Odds: A few cities like Albuquerque shows an estimated OR greater than 1.0, though the confidence interval is often wide. This suggests the possibility that male victims' homicides are more likely to be solved there, but the uncertainty is high.
+- **Cities with Higher Odds**: A few cities like Albuquerque shows an estimated OR greater than 1.0, though the confidence interval is often wide. This suggests the possibility that male victims' homicides are more likely to be solved there, but the uncertainty is high.
+
+## Problem 2
+
+Load dataset.
+
+```{r}
+data("weather_df")
+  
+weather_df = weather_df |>
+  select(tmax, tmin, prcp) |>
+  drop_na()
+```
+
+### Bootstrap
+
+Let's write a function to extract required estimates.
+
+```{r}
+# A single function to perform the full extraction for one bootstrap sample
+lm_fit = function(data) {
+  fit = lm(tmax ~ tmin + prcp, data = data)
+  # Extract model statistics (R^2)
+  r_sq = broom::glance(fit) |> 
+    pull(r.squared)
+  # Extract term statistics (coefficients)
+  betas = broom::tidy(fit) |>
+    filter(term %in% c("tmin", "prcp")) |>
+    pull(estimate)
+  
+  # 4. Calculate the ratio (tmin / prcp)
+  beta_ratio = betas[1] / betas[2]
+  
+  tibble(
+    r_hat_squared = r_sq,
+    beta_hat_ratio = beta_ratio
+  )
+}
+```
+
+Fit with 5000 bootstrap samples.
+
+```{r}
+set.seed(1)
+# Fit and Store the results
+bootstrap_results = weather_df |> 
+  bootstrap(n = 5000) |> 
+  mutate(
+    df = map(strap, as_tibble),
+    results = map(df, lm_fit),
+    ) |> 
+  select(.id, results) |> 
+  unnest(results)
+  
+```
+
+
+### Visualization of Distribution
+
+```{r}
+# Plot for R^2
+r_sq_plot <- bootstrap_results |>
+  ggplot(aes(x = r_hat_squared)) +
+  geom_histogram(bins = 50, fill = "mediumpurple", color = "white") +
+  geom_vline(xintercept = quantile(pull(bootstrap_results, r_hat_squared), c(0.025, 0.975)), linetype = "dashed", color = "red") +
+  labs(
+    title = expression(paste("Bootstrap Distribution of ", hat(r)^2)),
+    x = expression(hat(r)^2),
+    y = "Frequency"
+  ) 
+
+r_sq_plot
+```
+
+**Interpretation**: The distribution of bootstrapped coefficient of determination $\hat{r}^2$ is unimodal, symmetrical and highly concentrated, centered around approximately 0.942, though with a subtle left skew. This tight grouping of estimates, confirmed by the narrow 95% confidence interval, indicates that the model has very high and stable explanatory power. We can be highly confident that the true explanatory power of these two predictors falls in this narrow range, consistently explaining well over 93% of the variation in the maximum temperature.
+
+```{r}
+# Plot for Beta Product
+beta_product_plot <- bootstrap_results |>
+  ggplot(aes(x = beta_hat_ratio)) +
+  geom_histogram(bins = 50, fill = "lightgreen", color = "white") +
+  geom_vline(xintercept = quantile(pull(bootstrap_results, beta_hat_ratio), c(0.025, 0.975)), linetype = "dashed", color = "red") +
+  labs(
+    title = expression(paste("Bootstrap Distribution of ", hat(beta)[1] / hat(beta)[2])),
+    x = expression(hat(beta)[1] / hat(beta)[2]),
+    y = "Frequency"
+  ) 
+
+beta_product_plot
+```
+
+**Interpretation**: The distribution of the $\frac{\hat{\beta_1}}{\hat{\beta_2}}$ is unimodal and clearly left-skewed, with its peak shifted toward the right end of the distribution and a long tail extending to the left (negative values). The 95% confidence interval consists entirely of large negative values and does not include zero. This leads to two strong conclusions:
+
+- Magnitude: The effect of minimum temperature `tmin` on maximum temperature is reliably estimated to be hundreds of times greater than the effect of precipitation `prcp`.
+
+- Direction: The negative sign throughout the distribution confirms that the true effects of the two predictors on maximum temperature have opposite signs.
+
+### 95% Confidence Interval
+
+```{r}
+# Calculate 95% CI for both parameters
+ci_summary <- bootstrap_results |>
+  summarise(
+    R_Squared_LCI = quantile(r_hat_squared, 0.025),
+    R_Squared_UCI = quantile(r_hat_squared, 0.975),
+    Beta_ratio_LCI = quantile(beta_hat_ratio, 0.025),
+    Beta_ratio_UCI = quantile(beta_hat_ratio, 0.975)
+  )
+```
+
+- The 95% CI for $\hat{R}^2$ is (`r ci_summary[[1]][1]`, `r ci_summary[[2]][1]`). We are 95% confident that the true proportion of variance in maximum temperature `tmax` that is jointly explained by minimum temperature `tmin` and precipitation `prcp` lies within the calculated interval.
+
+- The The 95% CI for $\frac{\hat{\beta_1}}{\hat{\beta_2}}$ is (`r ci_summary[[3]][1]`, `r ci_summary[[4]][1]`). We are 95% confident that the true ratio of the effect of `tmin` to the effect of `prcp` lies within the calculated interval.
