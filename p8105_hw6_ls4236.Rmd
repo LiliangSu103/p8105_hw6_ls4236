@@ -33,9 +33,9 @@ scale_fill_discrete = scale_fill_viridis_d
 Load and clean data.
 
 ```{r}
-homi_df_raw = 
+homi_df_raw =
   read_csv(file = "./data/homicide-data.csv", na = c("NA",".","")) |> 
-  janitor::clean_names() 
+  janitor::clean_names()
 
 homi_df = homi_df_raw |> 
   mutate(
@@ -262,3 +262,142 @@ ci_summary <- bootstrap_results |>
 - The 95% CI for $\hat{R}^2$ is (`r ci_summary[[1]][1]`, `r ci_summary[[2]][1]`). We are 95% confident that the true proportion of variance in maximum temperature `tmax` that is jointly explained by minimum temperature `tmin` and precipitation `prcp` lies within the calculated interval.
 
 - The The 95% CI for $\frac{\hat{\beta_1}}{\hat{\beta_2}}$ is (`r ci_summary[[3]][1]`, `r ci_summary[[4]][1]`). We are 95% confident that the true ratio of the effect of `tmin` to the effect of `prcp` lies within the calculated interval.
+
+## Problem 3
+
+### Data cleaning
+
+```{r}
+bwt_df_raw = 
+  read_csv(file = "./data/birthweight.csv", na = c("NA",".","")) |> 
+  janitor::clean_names() 
+
+# check NA
+colSums(is.na(bwt_df_raw))
+
+bwt_df = bwt_df_raw |> 
+  mutate(
+    babysex = as.factor(babysex),
+    frace = as.factor(frace),
+    malform = as.factor(malform),
+    mrace = as.factor(mrace)
+  )
+
+# check NA
+colSums(is.na(bwt_df))
+```
+
+There is no `NA` or row number (`r nrow(bwt_df_raw)` vs. `r nrow(bwt_df)`) changes before and after the cleaning.  
+Hence, there is no missing values.
+
+### Proposed model
+
+The proposed model (`model_prop`) is designed to be a comprehensive model, incorporating a wide range of factors hypothesized to influence birthweight.
+
+**Modeling Process:** 
+
+- First, I fit a full model that included all available predictor variables.
+
+- Second, based on the model summary, I conducted a preliminary variable selection by retaining only those predictors with p-values less than 0.05. The rationale is that in such an inclusive model, a variable must be strongly associated with the outcome to remain statistically significant.
+
+- Third, the hypothesized structure of the underlying factors can be grouped into four categories:
+  - direct physical characteristics of the baby (e.g. `bhead`)
+  - demographic characteristics of the mother (e.g. `mrace`)
+  - mother’s prior information (e.g. `parity`)
+  - external influences (e.g. `smoken`)
+
+- Fourth, in addition to the variables already selected, I incorporated predictors based on my hypothesized framework for factors influencing birthweight. Specifically, the mother’s physical measurements should be included. For example, `mheight` may capture genetic influences, and measures of the mother’s physical condition during pregnancy like weight gain (`wtgain`) which reflect important physiological factors.
+
+**Proposed Model**: `bwt ~ babysex + bhead + blength + delwt + gaweeks + mrace + parity + smoken + wtgain + mheight`
+
+```{r}
+model_full <- lm(bwt ~ babysex + bhead + blength + delwt + fincome + 
+                    frace + gaweeks + malform + menarche + mheight + momage + mrace + 
+                    parity + pnumlbw + pnumsga + ppbmi + ppwt + smoken + wtgain, 
+              data = bwt_df)
+summary(model_full)
+
+# babysex + bhead + blength + delwt + gaweeks + mrace + parity + smoken are chosen in model_full
+
+model_prop <- lm(bwt ~ babysex + bhead + blength + delwt + 
+                    gaweeks + mrace + parity + smoken + wtgain + mheight, 
+              data = bwt_df)
+
+summary(model_prop)
+```
+
+**Results:** This model explains approximately 71.8% of the variance in `birthweight`, with all predictors statistically significant (p < 0.05).
+
+```{r}
+# Use modelr functions to get residuals and predictions
+model_prop_df = bwt_df |> 
+  add_predictions(model_prop, var = "fitted_values") |> 
+  add_residuals(model_prop, var = "residuals")
+
+# Plot residuals vs. fitted values using ggplot2
+ggplot(model_prop_df, aes(x = fitted_values, y = residuals)) +
+  geom_point(alpha = 0.3) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Residuals vs. Fitted Values (Proposed Model)",
+    x = "Fitted Values (Predicted bwt)",
+    y = "Residuals"
+  )
+```
+
+**Results:** This residual vs. fitted value plot shows no clear pattern, constant vertical spread, and with points randomly scattered around the red line at y = 0, though there are a few outliers and a slight tendency for variance to decrease with the fitted value increases.
+
+### Model Comparison
+
+We compare three models:
+
+- Proposed: `bwt ~ babysex + bhead + blength + delwt + gaweeks + mrace + parity + smoken + wtgain + mheight`
+
+- Comparison1: `bwt ~ blength + gaweeks`
+
+- Comparison2: `bwt ~ bhead * blength * babysex`
+
+```{r}
+# Define the list of model formulas to compare
+formulas = list(
+  proposed = bwt ~ babysex + bhead + blength + delwt + gaweeks + mrace + parity + smoken + wtgain + mheight,
+  comparison1 = bwt ~ blength + gaweeks,
+  comparison2 = bwt ~ bhead * blength * babysex
+)
+
+# Create 100 Monte Carlo cross-validation splits
+cv_df = 
+  crossv_mc(bwt_df, n = 100, test = 0.2) |> 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble)
+  )
+
+# fit and store resutls
+
+results_df = 
+  cv_df |> 
+  mutate(
+      # Fit the model to the training data for each fold
+      model_proposed = map(train, \(df) lm(formulas[["proposed"]], data = df)),
+      model_comparison1 = map(train, \(df) lm(formulas[["comparison1"]], data = df)),
+      model_comparison2 = map(train, \(df) lm(formulas[["comparison2"]], data = df))
+  ) |> 
+  mutate(
+    rmse_proposed = map2_dbl(model_proposed, test, rmse),
+    rmse_comparison1 = map2_dbl(model_comparison1, test, rmse),
+    rmse_comparison2 = map2_dbl(model_comparison2, test, rmse)
+  ) |> 
+  select(.id, rmse_proposed, rmse_comparison1, rmse_comparison2) |> 
+  summarise(
+    mrmse_proposed = mean(rmse_proposed),
+    mrmse_comparison1 = mean(rmse_comparison1),
+    mrmse_comparison2 = mean(rmse_comparison2)
+  ) 
+
+results_df |>
+  knitr::kable()
+```
+
+Clearly, the proposed model has smaller mean RMSE than other two contrast methods.
+
